@@ -50,7 +50,7 @@
 // ===== 动静判断阈值 =====
 #define STATIONARY_GYRO_THRESHOLD   8.0f   // 陀螺仪幅度阈值 (deg/s)，低于此值认为可能静止（TPOS时13个IMU全部静止，允许人手抖动）
 #define STATIONARY_CONFIRM_FRAMES   40     // 持续多少帧确认静止 (40帧=0.4s@100Hz)
-#define STATIONARY_RELEASE_FRAMES   5      // 持续多少帧确认运动 (5帧=0.05s)
+#define STATIONARY_RELEASE_FRAMES   5      // 持续多少帧确认运动 (5帧=0.05s@100Hz)
 
 // ===== CAN 配置 =====
 #define CAN_BAUDRATE     500000

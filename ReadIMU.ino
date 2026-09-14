@@ -87,6 +87,9 @@ static void on_ble_command(const char* cmd) {
 
 // ============ setup ============
 void setup() {
+    // 降低CPU频率以减少功耗（100Hz采样+60Hz CAN不需要240MHz）
+    setCpuFrequencyMhz(160);
+
 #ifdef _DEBUG_PRINT
     Serial.begin(115200);
     delay(200);
@@ -226,4 +229,7 @@ void loop() {
 #ifdef _ENABLE_CAN
     can_tick();
 #endif
+
+    // 让出CPU，降低功耗和发热（对100Hz采样和60Hz CAN无影响）
+    vTaskDelay(1);
 }
