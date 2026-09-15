@@ -64,7 +64,7 @@
 #define MASTER_TIME_SLOT     0    // 主控在时间片0发送命令/同步
 
 // 默认传感器ID（可通过BLE CANID命令修改，存NVS）
-#define DEFAULT_SENSOR_ID    IMU_ID_ForeArm_Left   // 12
+#define DEFAULT_SENSOR_ID    IMU_ID_Shoulder_Left   // 8
 
 // ===== BLE UUID（仅开发板用）=====
 #define BLE_SERVICE_UUID     "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -94,7 +94,7 @@
 #define SYNTRAK_HARDWARE_VERSION "HW1.3"
 #endif
 #ifndef SYNTRAK_SOFTWARE_VERSION
-#define SYNTRAK_SOFTWARE_VERSION "FW2.1"
+#define SYNTRAK_SOFTWARE_VERSION "FW1.2"
 #endif
 
 #endif // CONFIG_H

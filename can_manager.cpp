@@ -1,5 +1,6 @@
 #include "can_manager.h"
 #include <driver/twai.h>
+#include <esp_timer.h>
 #include <Preferences.h>
 
 // 调试输出宏（默认关闭，需要时在config.h定义_CAN_DEBUG）
@@ -12,11 +13,13 @@
 static const char* NVS_NS = "imu_cal";
 static uint32_t sensor_id = DEFAULT_SENSOR_ID;
 
-// 时间片同步状态
+// 时间片同步状态（计数器状态机）
+// esp_timer每278us(1/3时间片)回调一次，每3次回调(约833us) time_slot_counter+1
+// 缩短回调周期可将各传感器相位差控制在278us以内，避免时间片重叠冲突
 static bool     synced = false;
-static uint32_t sync_base_us = 0;       // 同步基准时刻
-static uint32_t last_slot_index = 0xFF;  // 上一次处理的时间片序号
-static bool     slot_sent = false;        // 当前周期是否已发送
+static volatile uint8_t time_slot_counter = 0;  // 当前时间片序号（0~TIME_SLOT_COUNT-1）
+static volatile uint8_t sub_slot = 0;            // 子计数器（0~2），每3次回调counter+1
+static bool     slot_sent = false;               // 当前周期是否已发送
 
 // 命令接收
 static volatile uint8_t last_command = 0;
@@ -30,6 +33,12 @@ static bool     has_pending_data = false;
 // 统计
 static uint32_t tx_fail_count = 0;
 static bool     bus_off_state = false;
+
+// esp_timer定时器（每833us一个时间片，稳定调用can_tick()，不受主循环IMU耗时影响）
+static esp_timer_handle_t g_can_timer = NULL;
+static void can_timer_callback(void* arg) {
+    can_tick();  // 非阻塞：接收命令 + 时间片发送 + bus-off检测
+}
 
 // ============ 内部函数 ============
 
@@ -128,26 +137,18 @@ static void can_receive() {
     twai_message_t msg;
     while (twai_receive(&msg, pdMS_TO_TICKS(0)) == ESP_OK) {
         if (msg.identifier == CAN_CMD_ID) {
-            // 收到主控帧 → 立即重置同步基准（不管帧里是什么命令）
-            sync_base_us = micros();
+            // 收到主控帧 → 时间片计数清0，重新对齐（不管帧里是什么命令）
+            time_slot_counter = 0;
+            sub_slot = 0;
+            slot_sent = false;
             if (!synced) {
                 synced = true;
                 Serial.println("[CAN] 首次收到主控帧，时间同步已对齐");
             }
-            slot_sent = false;
-            last_slot_index = 0xFF;
             // 处理具体命令
             handle_command(&msg);
         }
     }
-}
-
-// 计算当前在周期中的时间片序号 (0 ~ TIME_SLOT_COUNT-1)
-static uint32_t current_time_slot() {
-    uint32_t now = micros();
-    uint32_t elapsed = now - sync_base_us;
-    uint32_t cycle_pos = elapsed % CAN_PERIOD_US;
-    return cycle_pos / TIME_SLOT_US;
 }
 
 // 发送缓存的四元数
@@ -208,6 +209,24 @@ void can_init(uint32_t id) {
         Serial.printf("[CAN] 初始化成功 500kbps, ID=%lu, 时间片=%lu/%u\n",
                       sensor_id, sensor_id, TIME_SLOT_COUNT);
     }
+
+    // 启动esp_timer：每1ms稳定调用can_tick()
+    // 用ESP_TIMER_TASK模式（高优先级任务分发），确保发送时机不受主循环IMU处理影响
+    if (g_can_timer == NULL) {
+        esp_timer_create_args_t timer_args = {
+            .callback = can_timer_callback,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "can_tick_timer",
+            .skip_unhandled_events = true,
+        };
+        if (esp_timer_create(&timer_args, &g_can_timer) == ESP_OK) {
+            esp_timer_start_periodic(g_can_timer, TIME_SLOT_US / 3);  // 278us = 1/3时间片
+            Serial.println("[CAN] esp_timer started: 278us period (1/3 time slot) driving can_tick()");
+        } else {
+            Serial.println("[CAN] WARNING: esp_timer create failed");
+        }
+    }
 }
 
 void can_tick() {
@@ -215,23 +234,28 @@ void can_tick() {
     can_check_bus_off();
     if (bus_off_state) return;  // 恢复中，不处理发送
 
-    // 1. 接收主控帧（任何主控帧都自动重置同步基准）
+    // 1. 接收主控帧（收到同步帧会重置 time_slot_counter=0, sub_slot=0，重新对齐）
     can_receive();
 
     // 2. 未收到主控帧前不发送（等待同步）
     if (!synced) return;
 
-    // 3. 时间片调度
-    uint32_t slot = current_time_slot();
+    // 3. 子计数器+1（esp_timer每278us调用一次，每3次=约833us为一个时间片）
+    sub_slot++;
+    if (sub_slot >= 3) {
+        sub_slot = 0;
+        time_slot_counter++;  // 每833us counter+1
 
-    // 检测到新周期开始（slot回绕）
-    if (slot < last_slot_index) {
-        slot_sent = false;
+        // 到达周期末尾，新周期开始（清空已发送标记）
+        if (time_slot_counter >= TIME_SLOT_COUNT) {
+            time_slot_counter = 0;
+            slot_sent = false;
+        }
     }
-    last_slot_index = slot;
 
-    // 到达本传感器的时间片，且本周期未发送过
-    if (slot == sensor_id && !slot_sent) {
+    // 4. 到达或超过本传感器的时间片，且本周期未发送过 → 发送
+    // 每次回调都检查（278us一次），发送更及时，相位差控制在278us以内
+    if (time_slot_counter >= sensor_id && !slot_sent) {
         send_pending();
         slot_sent = true;
     }
@@ -279,10 +303,10 @@ uint32_t can_get_sensor_id() {
 }
 
 void can_trigger_sync() {
-    sync_base_us = micros();
+    time_slot_counter = 0;
+    sub_slot = 0;
     synced = true;
     slot_sent = false;
-    last_slot_index = 0xFF;
     Serial.println("[CAN] 本地触发时间同步");
 }
 

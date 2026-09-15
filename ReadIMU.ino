@@ -225,9 +225,10 @@ void loop() {
         // I2C读取失败时跳过此帧，但继续执行can_tick()（不影响时间片调度）
     }
 
-    // ---- 2. CAN tick（时间片发送 + 接收命令 + 时间同步）----
+    // ---- 2. CAN tick 已由 esp_timer 每1ms驱动（can_manager.cpp），主循环不再调用 ----
+    // 这样发送时机不受主循环 IMU 处理耗时影响，时间片不会被跳过
 #ifdef _ENABLE_CAN
-    can_tick();
+    // can_tick();  // 已移至 esp_timer 回调
 #endif
 
     // 让出CPU，降低功耗和发热（对100Hz采样和60Hz CAN无影响）
